@@ -1,5 +1,6 @@
 package com.rath.first.project.controller;
 
+import com.rath.first.project.config.AIModelConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -9,36 +10,29 @@ import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.InMemoryChatMemoryRepository;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * The main chat endpoint: a back-and-forth assistant that remembers the conversation.
- *
  * Three important ideas live in this class:
  *   1. A "system prompt" — permanent instructions that give the AI its role and rules.
  *   2. "Memory" — the AI itself is forgetful (every request starts blank), so we
  *      re-send recent messages each time to fake a continuous conversation.
- *   3. "Token logging" — every call costs money measured in tokens, so we record them.
  */
 @RestController
 public class ChatController {
 
-    // Standard logger — we'll use it to record how many tokens each call used.
     private static final Logger log = LoggerFactory.getLogger(ChatController.class);
 
     private final ChatClient chatClient;
-    private final String modelName;
+    private final AIModelConfig aiModelConfig;
 
     public ChatController(
             ChatClient.Builder chatClientBuilder,
-            // Reads the model name from application.properties so it's not hard-coded here.
-            @Value("${spring.ai.google.genai.chat.model}") String modelName) {
+            AIModelConfig aiModelConfig) {
 
-        this.modelName = modelName;
+        this.aiModelConfig = aiModelConfig;
 
         // --- MEMORY SETUP ---
         // The AI has no built-in memory: each API call is independent and knows nothing
@@ -93,20 +87,20 @@ public class ChatController {
             @RequestParam(value = "userQuery", defaultValue = "What is Virtual Thread pinning?") String userQuery,
             // Which conversation this message belongs to. Two people (or two browser tabs)
             // using different IDs get separate, independent memories. Same ID = same thread.
-            @RequestParam(value = "conversationId", defaultValue = "default-session") String conversationId) {
+            @RequestParam(value = "conversationId", defaultValue = "default-session") String conversationId,
+            @RequestParam(value = "creative", defaultValue = "false") boolean creative) {
 
         ChatResponse chatResponse = chatClient.prompt()
                 .user(userQuery)
                 // Tell the memory advisor WHICH conversation's history to load and update.
                 .advisors(advisorSpec -> advisorSpec.param(ChatMemory.CONVERSATION_ID, conversationId))
-                // Per-request settings:
-                //   model         -> which AI model to use
-                //   temperature 0 -> consistent, focused answers (higher = more creative)
-                //   maxOutputTokens 500 -> a hard cap on answer length = a cap on cost & time
-                .options(GoogleGenAiChatOptions.builder()
-                        .model(modelName)
-                        .temperature(0.0)
-                        .maxOutputTokens(500))
+                // Route the request based on user input (the "creative" flag):
+                //   creative=true  -> forCreativeBrainstorming() (higher temperature, varied output)
+                //   creative=false -> forTechnicalAnalysis()     (temperature 0, factual & precise)
+                // The model + sampling settings for each route live in AIModelConfig.
+                .options(creative
+                        ? aiModelConfig.forCreativeBrainstorming()
+                        : aiModelConfig.forTechnicalAnalysis())
                 .call()
                 // .chatResponse() gives us the FULL response (text + usage stats), not just
                 // the text — we need the extra info to log token usage below.
@@ -125,8 +119,6 @@ public class ChatController {
                     usage.getTotalTokens());      // the sum — what actually gets billed
         }
 
-        // Pull the plain text answer out of the full response to return to the caller.
-        // If something went wrong and there's no result, return an empty string instead.
         return chatResponse != null && chatResponse.getResult() != null
                 ? chatResponse.getResult().getOutput().getText()
                 : "";
