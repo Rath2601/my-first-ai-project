@@ -19,6 +19,7 @@ import org.springframework.web.bind.annotation.RestController;
  *   1. A "system prompt" — permanent instructions that give the AI its role and rules.
  *   2. "Memory" — the AI itself is forgetful (every request starts blank), so we
  *      re-send recent messages each time to fake a continuous conversation.
+ *   3. Now not caching system prompt (far too small to cache)
  */
 @RestController
 public class ChatController {

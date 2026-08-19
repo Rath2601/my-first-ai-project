@@ -3,6 +3,7 @@ package com.rath.first.project.controller;
 import com.rath.first.project.config.AIModelConfig;
 import com.rath.first.project.dto.TicketTriage;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -26,7 +27,14 @@ public class TriageController {
         this.aiModelConfig = aiModelConfig;
     }
 
+    // CACHE: triage is a pure function of the ticket text — temperature 0 (deterministic)
+    // and no conversation memory — so the same ticket always yields the same result.
+    // That makes it safe to cache: a repeat of an identical ticket returns instantly and
+    // skips the paid, slow API call. The cache key defaults to the only argument (ticketDescription).
+    // (We deliberately do NOT cache the "/" chat endpoint: it has memory and a creative
+    //  mode, so identical questions can legitimately produce different answers.)
     @PostMapping("/triage")
+    @Cacheable("ticketTriage")
     public TicketTriage triageTicket(@RequestBody String ticketDescription) {
         return chatClient.prompt()
                 // The user's ticket text becomes part of the question we send the model.
