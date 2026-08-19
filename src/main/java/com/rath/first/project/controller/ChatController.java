@@ -1,6 +1,8 @@
 package com.rath.first.project.controller;
 
 import com.rath.first.project.config.AIModelConfig;
+import com.rath.first.project.service.ResilientChatService;
+import com.rath.first.project.service.TokenGuardService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -10,6 +12,8 @@ import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.memory.InMemoryChatMemoryRepository;
 import org.springframework.ai.chat.memory.MessageWindowChatMemory;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.Resource;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -28,12 +32,20 @@ public class ChatController {
 
     private final ChatClient chatClient;
     private final AIModelConfig aiModelConfig;
+    private final TokenGuardService tokenGuard;
+    private final ResilientChatService resilientChatService;
 
     public ChatController(
             ChatClient.Builder chatClientBuilder,
-            AIModelConfig aiModelConfig) {
+            AIModelConfig aiModelConfig,
+            TokenGuardService tokenGuard,
+            ResilientChatService resilientChatService,
+            // The system prompt now lives in its own file (prompts are code — easy to review & version).
+            @Value("classpath:/prompts/system-persona.st") Resource systemPrompt) {
 
         this.aiModelConfig = aiModelConfig;
+        this.tokenGuard = tokenGuard;
+        this.resilientChatService = resilientChatService;
 
         // --- MEMORY SETUP ---
         // The AI has no built-in memory: each API call is independent and knows nothing
@@ -57,21 +69,8 @@ public class ChatController {
                 // The SYSTEM PROMPT: standing instructions the AI always follows. It sets
                 // the assistant's persona, rules, and answer style. Users never see or
                 // control this — it's the highest-authority voice in the conversation.
-                .defaultSystem("""
-                    You are a world-class Lead Java Engineer and Technical Interviewer.
-                    
-                    ### OBJECTIVE
-                    Prepare candidates for top-tier Java backend and JVM interviews using accurate, real-time industry context and modern Java specs (JDK 17 through JDK 25+).
-                    
-                    ### CORE GUIDELINES
-                    1. ACCURACY OVER HYPE: Always evaluate features based on low-level mechanics (JVM implementation, GC impact, memory overhead, thread safety) rather than high-level syntax shortcuts.
-                    2. PRODUCTION REALITY: When explaining interview concepts (e.g., Virtual Threads, Structured Concurrency, Scoped Values, Garbage Collectors), highlight practical trade-offs, failure modes, and when NOT to use them.
-                    3. STRUCTURED OUTPUT:
-                       - Start directly with the core concept and execution mechanics.
-                       - Provide concise, production-grade code snippets where applicable.
-                       - Limit responses to at most 4 sharp, highly informative bullet points or sentences.
-                    4. NO FLUFF: Skip introductory setups, polite conversational filler, or generic closing remarks. Jump immediately into the technical answer.
-                    """)
+                // Loaded from classpath:/prompts/system-persona.st (see the constructor param).
+                .defaultSystem(systemPrompt)
                 // Attach our plug-ins to every call made with this client:
                 //   SimpleLoggerAdvisor  -> logs the full prompt/response (handy while learning)
                 //   chatMemoryAdvisor    -> replays recent history so the chat feels continuous
@@ -91,7 +90,14 @@ public class ChatController {
             @RequestParam(value = "conversationId", defaultValue = "default-session") String conversationId,
             @RequestParam(value = "creative", defaultValue = "false") boolean creative) {
 
-        ChatResponse chatResponse = chatClient.prompt()
+        // --- PRE-FLIGHT TOKEN CAP ---
+        // Ask Gemini how big the input is and reject it (HTTP 413) if it's over our temporary
+        // cap, BEFORE spending a full billable generation call on it. (Counts the user's query;
+        // the real request also includes the system prompt + replayed history.)
+        tokenGuard.ensureWithinCap(userQuery);
+
+        // --- RESILIENT CALL: timeout + circuit breaker wrap the slow, remote LLM call ---
+        ChatResponse chatResponse = resilientChatService.execute(() -> chatClient.prompt()
                 .user(userQuery)
                 // Tell the memory advisor WHICH conversation's history to load and update.
                 .advisors(advisorSpec -> advisorSpec.param(ChatMemory.CONVERSATION_ID, conversationId))
@@ -105,7 +111,7 @@ public class ChatController {
                 .call()
                 // .chatResponse() gives us the FULL response (text + usage stats), not just
                 // the text — we need the extra info to log token usage below.
-                .chatResponse();
+                .chatResponse());
 
         // --- COST TRACKING ---
         // "Tokens" are the chunks of text the model reads and writes, and they're what you
